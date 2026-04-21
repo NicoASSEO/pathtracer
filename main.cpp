@@ -91,12 +91,12 @@ public:
 	bool intersect(const Ray& ray, Vector& P, double &t, Vector& N) const {
 		 // TODO (lab 1) : compute the intersection (just true/false at the begining of lab 1, then P, t and N as well)
 		 Vector OC = ray.O - this->C;
-		 double delta = std::pow(dot(ray.u, OC), 2) - (norm2(OC) - R*R);
-		 double t1 = dot(ray.u, this->C - ray.O) - std::sqrt(delta);
-		 double t2 = dot(ray.u, this->C - ray.O) + std::sqrt(delta);
-		 if delta < 0 {
-			return false;
-		 }
+		 double delta = std::pow(dot(ray.u, OC), 2) - (OC.norm2() - R*R);
+		 if (delta < 0) {
+			 return false;
+			}
+		double t1 = dot(ray.u, this->C - ray.O) - std::sqrt(delta);
+		double t2 = dot(ray.u, this->C - ray.O) + std::sqrt(delta);
 		 if (t1 < 0 && t2 < 0) {
 			return false;
 		 }
@@ -109,14 +109,9 @@ public:
 			t = std::min(t1, t2);
 		 }
 		 P = ray.O + t * ray.u;
-		 N = (P - this->C)
+		 N = (P - this->C);
 		 N.normalize();
 		 return true;
-
-
-
-
-		return false;
 	}
 
 	double R;
@@ -153,22 +148,20 @@ public:
 		// TODO (lab 1): iterate through the objects and check the intersections with all of them, 
 		double closest_t = std::numeric_limits<double>::infinity();
 		bool found = false;
-		Vector closest_P;
-		Vector closest_N;
-		for (const Object* obj : objects) {
-			if (obj->intersect(ray, P, t, N)) {
-				if (t < closest_t) {
-					closest_t = t;
-					closest_P = P;
-					closest_N = N;
-					object_id = objects.index(obj);
+		for (int i = 0; i < objects.size(); i++) {
+			Vector closest_P, closest_N;
+			double t_temp;
+			if (objects[i] -> intersect(ray, closest_P, t_temp, closest_N)) {
+				if (t_temp < closest_t) {
+					closest_t = t_temp;
+					P = closest_P;
+					N = closest_N;
+					t = t_temp;
+					object_id = i;
 					found = true;
 				}
 			}
 		}
-		P = closest_P;
-		t = closest_t;
-		N = closest_N;
 		return found;
 	}
 
@@ -184,11 +177,15 @@ public:
 		Vector P, N;
 		double t;
 		int object_id;
+		double epsilon = 1e-4;
 		if (intersect(ray, P, t, N, object_id)) {
-			Vector color = Vector(0, 0, 0);
 
 			if (objects[object_id]->mirror) {
-				
+
+				Vector reflected_direction = ray.u - 2 * dot(ray.u, N) * N;
+				reflected_direction.normalize();
+				Ray reflected_ray(P + epsilon * N, reflected_direction);
+				return getColor(reflected_ray, recursion_depth + 1);
 
 				// return getColor in the reflected direction, with recursion_depth+1 (recursively)
 			} // else
@@ -199,18 +196,26 @@ public:
 			} // else
 
 			// test if there is a shadow by sending a new ray
-			double epsilon = 1e-6;
-			Ray shadow_ray(P + epsilon * N, this->light_position - P);
-			shadow_ray.normalize();
-			Vector P;
-			Vector N;
-			double t;
-			if (this->intersect(shadow_ray, P, t, N, object_id)) {
-
 			
-			// if there is no shadow, compute the formula with dot products etc.
+			Vector to_light = light_position - P;
+			double dist_to_light = to_light.norm();
+			Vector light_dir = to_light / dist_to_light; 
+			Ray shadow_ray(P + epsilon * N, light_dir);
 
+			Vector P_shadow;
+			int object_id_shadow;
+			Vector N_shadow;
+			double t_shadow;
+			bool in_shadow = this->intersect(shadow_ray, P_shadow, t_shadow, N_shadow, object_id_shadow) && t_shadow < (this->light_position - P).norm();
 
+			if (!in_shadow) {
+				double dist2 = to_light.norm2();
+				double Li = light_intensity / (4.0 * M_PI * dist2); 
+				double cos_theta = std::max(0.0, dot(N, light_dir));  
+				Vector color = Li * (objects[object_id]->albedo / M_PI) * cos_theta;
+				return color;
+		}
+			
 			// TODO (lab 2) : add indirect lighting component with a recursive call
 		}
 
@@ -244,23 +249,22 @@ int main() {
 	Sphere floor(Vector(0, -1000, 0), 990, Vector(0.6, 0.5, 0.7));
 
 	Scene scene;
-	scene.camera_center = Vector(0, 0, 0);
+	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
 	scene.light_intensity = 3E7;
 	scene.fov = 60 * M_PI / 180.;
-	scene.gamma = 1.0;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
+	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
 	scene.addObject(&center_sphere);
 
-	/*
+	
 	scene.addObject(&wall_left);
 	scene.addObject(&wall_right);
 	scene.addObject(&wall_front);
 	scene.addObject(&wall_behind);
 	scene.addObject(&ceiling);
 	scene.addObject(&floor);
-	*/
 
 	std::vector<unsigned char> image(W * H * 3, 0);
 
