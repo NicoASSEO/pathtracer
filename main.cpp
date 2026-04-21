@@ -2,6 +2,10 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <limits>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -17,6 +21,16 @@ static std::default_random_engine engine[32];
 static std::uniform_real_distribution<double> uniform(0, 1);
 
 double sqr(double x) { return x * x; };
+
+void boxMuller2D(double sigma, double& dx, double& dy) {
+	int tid = omp_get_thread_num() % 32;
+	double r1 = std::max(uniform(engine[tid]), 1e-12);
+	double r2 = uniform(engine[tid]);
+	double factor = sigma * std::sqrt(-2.0 * std::log(r1));
+	double angle = 2.0 * M_PI * r2;
+	dx = factor * std::cos(angle);
+	dy = factor * std::sin(angle);
+}
 
 class Vector {
 public:
@@ -54,6 +68,9 @@ Vector operator*(const double a, const Vector& b) {
 Vector operator*(const Vector& a, const double b) {
 	return Vector(a[0]*b, a[1]*b, a[2]*b);
 }
+Vector multiply(const Vector& a, const Vector& b) {
+	return Vector(a[0] * b[0], a[1] * b[1], a[2] * b[2]);
+}
 Vector operator/(const Vector& a, const double b) {
 	return Vector(a[0] / b, a[1] / b, a[2] / b);
 }
@@ -63,6 +80,32 @@ double dot(const Vector& a, const Vector& b) {
 Vector cross(const Vector& a, const Vector& b) {
 	return Vector(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
 }
+
+Vector sampleHemi(const Vector& N) {
+	int tid = omp_get_thread_num();
+	double r1 = uniform(engine[tid]);
+	double r2 = uniform(engine[tid]);
+
+	double phi = 2. * M_PI * r1;
+	double x = std::cos(phi) * std::sqrt(r2);
+	double y = std::sin(phi) * std::sqrt(r2);
+	double z = std::sqrt(1. - r2);
+
+	Vector T;
+	if (std::fabs(N[0]) < 0.9) {
+		T = cross(Vector(1, 0, 0), N);
+	}
+	else {
+		T = cross(Vector(0, 1, 0), N);
+	}
+	T.normalize();
+	Vector B = cross(N, T);
+
+	Vector wi = x * T + y * B + z * N;
+	wi.normalize();
+	return wi;
+}
+
 
 class Ray {
 public:
@@ -196,7 +239,7 @@ public:
 			} // else
 
 			// test if there is a shadow by sending a new ray
-			
+			Vector direct(0,0,0);
 			Vector to_light = light_position - P;
 			double dist_to_light = to_light.norm();
 			Vector light_dir = to_light / dist_to_light; 
@@ -212,11 +255,15 @@ public:
 				double dist2 = to_light.norm2();
 				double Li = light_intensity / (4.0 * M_PI * dist2); 
 				double cos_theta = std::max(0.0, dot(N, light_dir));  
-				Vector color = Li * (objects[object_id]->albedo / M_PI) * cos_theta;
-				return color;
+				direct = Li * (objects[object_id]->albedo / M_PI) * cos_theta;
 		}
 			
 			// TODO (lab 2) : add indirect lighting component with a recursive call
+			Vector wi = sampleHemi(N);
+			Ray indirect_ray(P + epsilon * N, wi);
+			Vector indirect = multiply(objects[object_id]->albedo, getColor(indirect_ray, recursion_depth + 1));
+
+			return direct + indirect;
 		}
 
 		
@@ -235,12 +282,13 @@ public:
 int main() {
 	int W = 512;
 	int H = 512;
+	int samples_per_pixel = 32;
 
 	for (int i = 0; i<32; i++) {
 		engine[i].seed(i);
 	}
 
-	Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8));
+	Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8), true);
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -251,9 +299,9 @@ int main() {
 	Scene scene;
 	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
-	scene.light_intensity = 3E7;
+	scene.light_intensity = 2E7;
 	scene.fov = 60 * M_PI / 180.;
-	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
+	scene.gamma = 2.0;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
 	scene.addObject(&center_sphere);
@@ -271,19 +319,16 @@ int main() {
 #pragma omp parallel for schedule(dynamic, 1)
 	for (int i = 0; i < H; i++) {
 		for (int j = 0; j < W; j++) {
-			Vector color;
-
-			// TODO (lab 1) : correct ray_direction so that it goes through each pixel (j, i)			
-			Vector ray_direction(j -W/2 + 0.5, H/2 - i - 0.5, -W/(2*tan(scene.fov/2)));
-			ray_direction.normalize();
-
-			Ray ray(scene.camera_center, ray_direction);
-
-			// TODO (lab 2) : add Monte Carlo / averaging of random ray contributions here
-			// TODO (lab 2) : add antialiasing by altering the ray_direction here
-			// TODO (lab 2) : add depth of field effect by altering the ray origin (and direction) here
-
-			color  = scene.getColor(ray, 0);
+			Vector color(0, 0, 0);
+			for (int s = 0; s < samples_per_pixel; s++) {
+				double dx, dy;
+				boxMuller2D(0.45, dx, dy);
+				Vector ray_direction(j - W / 2. + 0.5 + dx, H / 2. - i - 0.5 + dy, -W / (2 * tan(scene.fov / 2)));
+				ray_direction.normalize();
+				Ray ray(scene.camera_center, ray_direction);
+				color = color + scene.getColor(ray, 0);
+			}
+			color = color / samples_per_pixel;
 
 			image[(i * W + j) * 3 + 0] = std::min(255., std::max(0., 255. * std::pow(color[0] / 255., 1. / scene.gamma)));
 			image[(i * W + j) * 3 + 1] = std::min(255., std::max(0., 255. * std::pow(color[1] / 255., 1. / scene.gamma)));
