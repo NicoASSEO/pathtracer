@@ -490,7 +490,7 @@ int main() {
 
 	TriangleMesh cat(Vector(0.8, 0.8, 0.8), false, false);
 	cat.readOBJ("cat.obj");
-	cat.scale_translate(0.6, Vector(0, -10, 0));
+	cat.scale_translate(0.6, Vector(0, -5, 0));
 	// Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8), true);
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
