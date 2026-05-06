@@ -181,10 +181,47 @@ class TriangleIndices {
 		int group;  // face group
 	};
 
+
+struct BoundingBox {
+	Vector Bmin, Bmax;
+
+	BoundingBox() {
+		for (int k = 0; k < 3; k++) {
+			Bmin[k] =  1e10;
+			Bmax[k] = -1e10;
+		}
+	}
+
+	bool intersect(const Ray& ray, double& t_enter, double& t_exit) const {
+		double tx0 = (Bmin[0] - ray.O[0]) / ray.u[0];
+		double tx1 = (Bmax[0] - ray.O[0]) / ray.u[0];
+		if (tx0 > tx1) std::swap(tx0, tx1);
+		double ty0 = (Bmin[1] - ray.O[1]) / ray.u[1];
+		double ty1 = (Bmax[1] - ray.O[1]) / ray.u[1];
+		if (ty0 > ty1) std::swap(ty0, ty1);
+		double tz0 = (Bmin[2] - ray.O[2]) / ray.u[2];
+		double tz1 = (Bmax[2] - ray.O[2]) / ray.u[2];
+		if (tz0 > tz1) std::swap(tz0, tz1);
+		t_enter = std::max(tx0, std::max(ty0, tz0));
+		t_exit  = std::min(tx1, std::min(ty1, tz1));
+		return t_enter <= t_exit && t_exit >= 0;
+	}
+};
+
+// each node stores a bbox and a range [start_index, end_index) into the indices array
+// left/right are null for leaf nodes
+struct BVHNode {
+	BoundingBox bbox;
+	int start_index, end_index;
+	BVHNode* left;
+	BVHNode* right;
+	BVHNode() : left(nullptr), right(nullptr), start_index(0), end_index(0) {}
+};
+
 // Class only used in labs 3 and 4 
 class TriangleMesh : public Object {
 public:
-	TriangleMesh(const Vector& albedo, bool mirror = false, bool transparent = false) : ::Object(albedo, mirror, transparent) {};
+	TriangleMesh(const Vector& albedo, bool mirror = false, bool transparent = false) : ::Object(albedo, mirror, transparent), bvh_root(nullptr) {};
 
 	// first scale and then translate the current object
 	void scale_translate(double s, const Vector& t) {
@@ -311,58 +348,104 @@ public:
 	}
 	
 	
-	// TODO ray-mesh intersection (labs 3 and 4)
-	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
-		// TODO (labs 3 and 4)
-		// lab 3 : once done, speed it up by first checking against the mesh bounding box
-		Vector bbox_min = vertices[0], bbox_max = vertices[0];
-  	for (const auto& v : vertices) {
-      for (int k = 0; k < 3; k++) {
-          bbox_min[k] = std::min(bbox_min[k], v[k]);
-          bbox_max[k] = std::max(bbox_max[k], v[k]);
-      }
-  	}
+	// build tree recurisvely
+	BVHNode* build_bvh(int start, int end) {
+		BVHNode* node = new BVHNode();
+		node->start_index = start;
+		node->end_index   = end;
 
-		double t_enter = -std::numeric_limits<double>::infinity();
-		double t_exit  =  std::numeric_limits<double>::infinity();
-		for (int axis = 0; axis < 3; axis++) {
-			double t0 = (bbox_min[axis] - ray.O[axis]) / ray.u[axis];
-			double t1 = (bbox_max[axis] - ray.O[axis]) / ray.u[axis];
-			if (t0 > t1) std::swap(t0, t1);
-			t_enter = std::max(t_enter, t0);
-			t_exit  = std::min(t_exit,  t1);
+		for (int i = start; i < end; i++) {
+			for (int v = 0; v < 3; v++) {
+				const Vector& vert = vertices[indices[i].vtx[v]];
+				for (int k = 0; k < 3; k++) {
+					node->bbox.Bmin[k] = std::min(node->bbox.Bmin[k], vert[k]);
+					node->bbox.Bmax[k] = std::max(node->bbox.Bmax[k], vert[k]);
+				}
+			}
 		}
-		if (t_enter > t_exit || t_exit < 0) return false;
+
+		// stop at 5 traigles in leaf
+		if (end - start <= 5) return node;
+
+		// do diagonal and split along longest axis
+		Vector diag = node->bbox.Bmax - node->bbox.Bmin;
+		int longest_axis = 0;
+		if (diag[1] > diag[longest_axis]) longest_axis = 1;
+		if (diag[2] > diag[longest_axis]) longest_axis = 2;
+
+		double mid = (node->bbox.Bmin[longest_axis] + node->bbox.Bmax[longest_axis]) / 2.0;
+
 		
-		// lab 3 : for each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
+		int pivot = start;
+		for (int i = start; i < end; i++) {
+			Vector centroid = (vertices[indices[i].vtx[0]] + vertices[indices[i].vtx[1]] + vertices[indices[i].vtx[2]]) / 3.0;
+			if (centroid[longest_axis] < mid) {
+				std::swap(indices[i], indices[pivot]);
+				pivot++;
+			}
+		}
+
+		if (pivot == start || pivot == end) return node;
+
+		node->left  = build_bvh(start, pivot);
+		node->right = build_bvh(pivot, end);
+		return node;
+	}
+
+	void build_bvh() {
+		bvh_root = build_bvh(0, indices.size());
+	}
+
+	// traverse tree and check for intersections
+	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
+		double t_enter, t_exit;
+		if (!bvh_root->bbox.intersect(ray, t_enter, t_exit)) return false;
+
 		bool hit = false;
 		double t_best = std::numeric_limits<double>::infinity();
-		for (auto& tri : indices) {
-			const Vector& A = vertices[tri.vtx[0]];
-			const Vector& B = vertices[tri.vtx[1]];
-			const Vector& C = vertices[tri.vtx[2]];
-			Vector e1 = B - A;
-			Vector e2 = C - A;
-			Vector new_normal = cross(e1, e2);
-			double denom = dot(ray.u, new_normal);
-			Vector AO    = A - ray.O;
-			Vector AOxu  = cross(AO, ray.u);
-			double beta  =  dot(e2, AOxu) / denom;
-			double gamma = -dot(e1, AOxu) / denom;
-			double alpha = 1.0 - beta - gamma;
-			double t_hit = dot(AO, new_normal) / denom;
-			if (t_hit < 0 || t_hit >= t_best || alpha < 0 || alpha > 1 || beta < 0 || beta > 1 || gamma < 0 || gamma > 1) continue;
-			t_best = t_hit;
-			hit = true;
-			P = ray.O + t_best * ray.u;
-			N = new_normal;
-			N.normalize();		
+
+		std::vector<BVHNode*> nodes_to_visit;
+		nodes_to_visit.push_back(bvh_root);
+
+		while (!nodes_to_visit.empty()) {
+			BVHNode* cur = nodes_to_visit.back();
+			nodes_to_visit.pop_back();
+
+			if (cur->left) {
+				// internal node: check both children, only descend if bbox is closer than best hit so far
+				double tl0, tl1, tr0, tr1;
+				if (cur->left->bbox.intersect(ray, tl0, tl1) && tl0 < t_best)
+					nodes_to_visit.push_back(cur->left);
+				if (cur->right->bbox.intersect(ray, tr0, tr1) && tr0 < t_best)
+					nodes_to_visit.push_back(cur->right);
+			} else {
+				// leaf: run Moller-Trumbore on all triangles in this node (basically lab3)
+				for (int i = cur->start_index; i < cur->end_index; i++) {
+					const Vector& A = vertices[indices[i].vtx[0]];
+					const Vector& B = vertices[indices[i].vtx[1]];
+					const Vector& C = vertices[indices[i].vtx[2]];
+					Vector e1 = B - A;
+					Vector e2 = C - A;
+					Vector new_normal = cross(e1, e2);
+					double denom = dot(ray.u, new_normal);
+					Vector AO   = A - ray.O;
+					Vector AOxu = cross(AO, ray.u);
+					double beta  =  dot(e2, AOxu) / denom;
+					double gamma = -dot(e1, AOxu) / denom;
+					double alpha = 1.0 - beta - gamma;
+					double t_hit = dot(AO, new_normal) / denom;
+					if (t_hit < 0 || t_hit >= t_best || alpha < 0 || alpha > 1 || beta < 0 || beta > 1 || gamma < 0 || gamma > 1) continue;
+					t_best = t_hit;
+					hit = true;
+					P = ray.O + t_best * ray.u;
+					N = new_normal;
+					N.normalize();
+				}
+			}
 		}
 		t = t_best;
 		return hit;
-		// lab 4 : recursively apply the bounding-box test from a BVH datastructure
-	};
-
+	}
 
 
 std::vector<TriangleIndices> indices;
@@ -370,6 +453,7 @@ std::vector<Vector> vertices;
 std::vector<Vector> normals;
 std::vector<Vector> uvs;
 std::vector<Vector> vertexcolors;
+BVHNode* bvh_root;
 };
 
 
@@ -480,9 +564,9 @@ public:
 
 
 int main() {
-	int W = 512;
-	int H = 512;
-	int samples_per_pixel = 16;
+	int W = 1024;
+	int H = 1024;
+	int samples_per_pixel = 32;
 
 	for (int i = 0; i<32; i++) {
 		engine[i].seed(i);
@@ -491,7 +575,8 @@ int main() {
 	TriangleMesh cat(Vector(0.8, 0.8, 0.8), false, false);
 	cat.readOBJ("cat.obj");
 	cat.scale_translate(0.6, Vector(0, -5, 0));
-	// Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8), true);
+	cat.build_bvh(); 
+	Sphere center_sphere(Vector(20, 0, -5), 10., Vector(0.8, 0.8, 0.8), true);
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -505,9 +590,9 @@ int main() {
 	scene.light_intensity = 2E7;
 	scene.fov = 60 * M_PI / 180.;
 	scene.gamma = 2.0;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
-	scene.max_light_bounce = 5;
+	scene.max_light_bounce = 10;
 	
-	// scene.addObject(&center_sphere);
+	scene.addObject(&center_sphere);
 	
 	
 	scene.addObject(&cat);
